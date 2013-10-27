@@ -474,8 +474,10 @@ static void	kc_cassette_set_motor(running_machine &machine, int motor_state)
 /* The basic transmit proceedure is working, keys are received */
 /* Todo: Key-repeat, and allowing the same key to be pressed twice! */
 
-#define KC_KEYBOARD_DEBUG 0
+/*
+#define KC_KEYBOARD_DEBUG 1
 #define LOG_KBD(x) do { if (KC_KEYBOARD_DEBUG) logerror x; } while (0)
+*/
 
 /*
 
@@ -788,11 +790,6 @@ triggers the time measurement by the CTC channel 3." */
 
 */
 
-/* no transmit is in progress, keyboard is idle ready to transmit a key */
-#define KC_KEYBOARD_TRANSMIT_IDLE	0x0001
-/* keyboard is transmitting a key-code */
-#define KC_KEYBOARD_TRANSMIT_ACTIVE	0x0002
-
 /* previous state of keyboard - currently used to detect if a key has been pressed/released  since last scan */
 /* brdy output from pio */
 
@@ -805,244 +802,203 @@ triggers the time measurement by the CTC channel 3." */
     transmit_timer is used to transmit the scan-code to the kc.
 */
 
-static void kc_keyboard_attempt_transmit(running_machine &machine);
-static TIMER_CALLBACK(kc_keyboard_update);
+/* FLOH keyboard hack: convert scan code to ascii */
+unsigned char kc_keyboard_scancode_to_ascii(int shift, unsigned char scan_code)
+{
+	unsigned char ascii;
+	switch (scan_code)
+	{
+		case 3:		ascii = 0x08; break;	// cursor left
+		case 61:	ascii = 0x09; break;	// cursor right
+		case 59:	ascii = 0x0A; break;	// cursor down
+		case 60:	ascii = 0x0B; break;	// cursor up
+		case 63:	ascii = 0x0D; break;	// enter
+		case 35:	ascii = 0x20; break;	// ' '
+		case 30:	ascii = 0x1B; break;	// F7 = ESC
+		case 38:	ascii = 0x13; break;	// F8 = STOP
+		case 28:	ascii = 0x1A; break;	// F9 = INSERT
+		case 12:	ascii = 0x01; break;	// F10 = BACKSPACE CLEAR
+		case 58:	ascii = shift ? '!' : '1'; break;
+		case 2:		ascii = shift ? '@' : '2'; break;
+		case 10:	ascii = shift ? '#' : '3'; break;
+		case 50:	ascii = shift ? '$' : '4'; break;
+		case 18:	ascii = shift ? '%' : '5'; break;
+		case 42:	ascii = shift ? '^' : '6'; break;
+		case 26:	ascii = shift ? '&' : '7'; break;
+		case 34:	ascii = shift ? '*' : '8'; break;
+		case 29:	ascii = shift ? '(' : '9'; break;
+		case 21:	ascii = shift ? ')' : '0'; break;
+		case 13:	ascii = shift ? '_' : '-'; break;
+		case 5:		ascii = shift ? '=' : '+'; break;
+		case 56:	ascii = shift ? 'q' : 'Q'; break;
+		case 0:		ascii = shift ? 'w' : 'W'; break;
+		case 8:		ascii = shift ? 'e' : 'E'; break;
+		case 48:	ascii = shift ? 'r' : 'R'; break;
+		case 16:	ascii = shift ? 't' : 'T'; break;
+		case 40:	ascii = shift ? 'y' : 'Y'; break;
+		case 24:	ascii = shift ? 'u' : 'U'; break;
+		case 32:	ascii = shift ? 'i' : 'I'; break;
+		case 27:	ascii = shift ? 'o' : 'O'; break;
+		case 19:	ascii = shift ? 'p' : 'P'; break;
+		case 11:	ascii = shift ? '{' : '['; break;
+		case 1:		ascii = shift ? 'a' : 'A'; break;
+		case 9:		ascii = shift ? 's' : 'S'; break;
+		case 49:	ascii = shift ? 'd' : 'D'; break;
+		case 17:	ascii = shift ? 'f' : 'F'; break;
+		case 41:	ascii = shift ? 'g' : 'G'; break;
+		case 25:	ascii = shift ? 'h' : 'H'; break;
+		case 33:	ascii = shift ? 'j' : 'J'; break;
+		case 36:	ascii = shift ? 'k' : 'K'; break;
+		case 44:	ascii = shift ? 'l' : 'L'; break;
+		case 52:	ascii = shift ? ';' : ':'; break;
+		case 51:	ascii = shift ? '\'' : '"'; break;
+		case 7:		ascii = shift ? 'z' : 'Z'; break;
+		case 15:	ascii = shift ? 'x' : 'X'; break;
+		case 55:	ascii = shift ? 'c' : 'C'; break;
+		case 23:	ascii = shift ? 'v' : 'V'; break;
+		case 47:	ascii = shift ? 'b' : 'B'; break;
+		case 31:	ascii = shift ? 'n' : 'N'; break;
+		case 39:	ascii = shift ? 'm' : 'M'; break;
+		case 37:	ascii = shift ? '<' : ','; break;
+		case 45:	ascii = shift ? '>' : '.'; break;
+		case 53:	ascii = shift ? '?' : '/'; break;
+		default:	ascii = 0;
+	}
+	return ascii;
+}
 
-/* this is called at a regular interval */
-static TIMER_CALLBACK(kc_keyboard_transmit_timer_callback)
+/* FLOH keyboard hack: translate scan code to ascii and write to 0x1fd */
+void kc_keyboard_write_key(running_machine& machine, unsigned char scan_code)
+{
+	static int repeat_count = 0;
+
+	// don't overwrite if previous key hasn't been read yet
+	if (0 == (ram_get_ptr(machine.device(RAM_TAG))[0x1f8] & 1))
+	{
+		// special case: no key pressed
+		if (0 == scan_code)
+		{
+			repeat_count = 0;
+			ram_get_ptr(machine.device(RAM_TAG))[0x1fd] = 0;	// clear ascii code location
+			ram_get_ptr(machine.device(RAM_TAG))[0x1fa]	= 0;	// clear repeat counter
+		}
+		else
+		{
+			// get state of shift key
+			int shift = input_port_read(machine, "SHIFT") & 0x01;		
+			const unsigned char ascii = kc_keyboard_scancode_to_ascii(shift, scan_code);
+			int write_char = 1;
+			// same as stored?
+			if (ascii == ram_get_ptr(machine.device(RAM_TAG))[0x1fd])
+			{
+				// yes, must be held for certain amount of time before repeat?
+				const int repeat_time = (repeat_count == 0) ? 40 : 20;
+				if (ram_get_ptr(machine.device(RAM_TAG))[0x1fa]++ > repeat_time)
+				{
+					// reset repeat counter
+					ram_get_ptr(machine.device(RAM_TAG))[0x1fa]	= 0;
+					repeat_count++;
+				}
+				else
+				{
+					// wait a little longer
+					write_char = 0;
+				}
+			}
+			if (write_char)
+			{
+				// store character
+				ram_get_ptr(machine.device(RAM_TAG))[0x1fd] = ascii;
+				ram_get_ptr(machine.device(RAM_TAG))[0x1f8] |= 1;
+			}
+		}
+	}
+}
+
+/* keyboard callback */
+/*
+void kc_keyboard_pulse_pio(running_machine& machine, int pulse)
 {
 	kc_state *state = machine.driver_data<kc_state>();
-	if (state->m_keyboard_data.transmit_pulse_count_remaining!=0)
-	{
-		int pulse_state;
-		/* byte containing pulse state */
-		int pulse_byte_count = state->m_keyboard_data.transmit_pulse_count>>3;
-		/* bit within byte containing pulse state */
-		int pulse_bit_count = 7-(state->m_keyboard_data.transmit_pulse_count & 0x07);
+	z80pio_bstb_w(state->m_kc85_z80pio, pulse & state->m_brdy);
+	// FIXME: understand why the PIO fail to acknowledge the irq on kc85_2/3
+	z80pio_d_w(state->m_kc85_z80pio, 1, state->m_kc85_pio_data[1]);	
 
-		/* get current pulse state */
-		pulse_state = (state->m_keyboard_data.transmit_buffer[pulse_byte_count]>>pulse_bit_count) & 0x01;
-
-		LOG_KBD(("kc keyboard sending pulse: %02x\n",pulse_state));
-
-		/* set pulse */
-		z80pio_bstb_w(state->m_kc85_z80pio,pulse_state & state->m_brdy);
-
-		/* update counts */
-		state->m_keyboard_data.transmit_pulse_count_remaining--;
-		state->m_keyboard_data.transmit_pulse_count++;
-
-	}
-	else
-	{
-		state->m_keyboard_data.transmit_state = KC_KEYBOARD_TRANSMIT_IDLE;
-	}
+mame_printf_verbose("pulse: %d, write: %d\n", pulse & state->m_brdy, state->m_kc85_pio_data[1]);	
 }
-
-/* add a pulse */
-static void kc_keyboard_add_pulse_to_transmit_buffer(kc_state *state, int pulse_state)
-{
-	int pulse_byte_count = state->m_keyboard_data.transmit_pulse_count_remaining>>3;
-	int pulse_bit_count = 7-(state->m_keyboard_data.transmit_pulse_count_remaining & 0x07);
-
-	if (pulse_state)
-	{
-		state->m_keyboard_data.transmit_buffer[pulse_byte_count] |= (1<<pulse_bit_count);
-	}
-	else
-	{
-		state->m_keyboard_data.transmit_buffer[pulse_byte_count] &= ~(1<<pulse_bit_count);
-	}
-
-	state->m_keyboard_data.transmit_pulse_count_remaining++;
-}
-
+*/
 
 /* initialise keyboard queue */
 static void kc_keyboard_init(running_machine &machine)
 {
+mame_printf_verbose(("FLOH: kc_keyboard_init CALLED!\n"));
+
 	kc_state *state = machine.driver_data<kc_state>();
-	int i;
-	static const char *const keynames[] = { "KEY0", "KEY1", "KEY2", "KEY3", "KEY4", "KEY5", "KEY6", "KEY7" };
+/*
+	state->m_keyboard_data.m_transmit_buffer.pulse_sent = 0;
+	state->m_keyboard_data.m_transmit_buffer.pulse_count = 0;
+	memset(&(state->m_keyboard_data.m_transmit_buffer), 0, sizeof(state->m_keyboard_data.m_transmit_buffer));
 
-	/* head and tail of list is at beginning */
-	state->m_keyboard_data.head = (state->m_keyboard_data.tail = 0);
-
-	/* kc keyboard is not transmitting */
-	state->m_keyboard_data.transmit_state = KC_KEYBOARD_TRANSMIT_IDLE;
-
-	/* setup transmit parameters */
-	state->m_keyboard_data.transmit_pulse_count_remaining = 0;
-	state->m_keyboard_data.transmit_pulse_count = 0;
-
-	/* set initial state */
-	z80pio_bstb_w(state->m_kc85_z80pio,0);
-
-
-	for (i=0; i<KC_KEYBOARD_NUM_LINES-1; i++)
-	{
-		/* read input port */
-		state->m_previous_keyboard[i] = input_port_read(machine, keynames[i]);
-	}
+	kc_keyboard_pulse_pio(machine, CLEAR_LINE);
+*/
 }
 
-
-/* add a key to the queue */
-static void kc_keyboard_queue_scancode(kc_state *state, int scan_code)
+/* update keyboard */
+static TIMER_CALLBACK(kc_keyboard_update_and_transmit)
 {
-	/* add a key */
-	state->m_keyboard_data.keycodes[state->m_keyboard_data.tail] = scan_code;
-	/* update next insert position */
-	state->m_keyboard_data.tail = (state->m_keyboard_data.tail + 1) % KC_KEYCODE_QUEUE_LENGTH;
-}
+	kc_state *state = machine.driver_data<kc_state>();
+	kc_keyboard& keyboard_data = state->m_keyboard_data;
 
-/* fill transmit buffer with pulse for 0 or 1 bit */
-static void kc_keyboard_add_bit(kc_state *state, int bit)
-{
-	if (bit)
+/*
+	if (keyboard_data.m_transmit_buffer.pulse_sent < keyboard_data.m_transmit_buffer.pulse_count)
 	{
-		kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-		kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-		kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-		kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-		kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-		kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-		kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
+		// byte containing pulse state
+		int pulse_byte_count = keyboard_data.m_transmit_buffer.pulse_sent>>3;
+		// bit within byte containing pulse state
+		int pulse_bit_count = 7 - (keyboard_data.m_transmit_buffer.pulse_sent & 0x07);
+
+		// get current pulse state
+		int pulse_state = (keyboard_data.m_transmit_buffer.data[pulse_byte_count]>>pulse_bit_count) & 0x01;
+
+		LOG(("KC keyboard sending pulse: %02x\n", pulse_state));
+
+		// send pulse
+		kc_keyboard_pulse_pio(machine, pulse_state ? ASSERT_LINE : CLEAR_LINE);
+
+		// update counts
+		keyboard_data.m_transmit_buffer.pulse_sent++;
 	}
 	else
 	{
-		kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-		kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-		kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-		kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-		kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	}
+*/
+		// if there is nothing to send, rescan the keyboard
+		static const char *const keynames[] = { "KEY0", "KEY1", "KEY2", "KEY3", "KEY4", "KEY5", "KEY6", "KEY7" };
 
-	/* "end of bit" pulse -> end of time for bit */
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 1);
-}
+		keyboard_data.m_transmit_buffer.pulse_sent = 0;
+		keyboard_data.m_transmit_buffer.pulse_count = 0;
 
-
-static void kc_keyboard_begin_transmit(running_machine &machine, int scan_code)
-{
-	kc_state *state = machine.driver_data<kc_state>();
-	int i;
-	int scan;
-
-	state->m_keyboard_data.transmit_pulse_count_remaining = 0;
-	state->m_keyboard_data.transmit_pulse_count = 0;
-
-	/* initial pulse -> start of code */
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 1);
-
-	scan = scan_code;
-
-	/* state of shift key */
-	kc_keyboard_add_bit(state, ((input_port_read(machine, "SHIFT") & 0x01)^0x01));
-
-	for (i=0; i<6; i++)
-	{
-		/* each bit in turn */
-		kc_keyboard_add_bit(state, scan & 0x01);
-		scan = scan>>1;
-	}
-
-	/* signal end of scan-code */
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 1);
-
-	/* back to original state */
-	kc_keyboard_add_pulse_to_transmit_buffer(state, 0);
-}
-
-/* attempt to transmit a new keycode to the base unit */
-static void kc_keyboard_attempt_transmit(running_machine &machine)
-{
-	kc_state *state = machine.driver_data<kc_state>();
-	/* is the keyboard transmit is idle */
-	if (state->m_keyboard_data.transmit_state == KC_KEYBOARD_TRANSMIT_IDLE)
-	{
-		/* keycode available? */
-		if (state->m_keyboard_data.head!=state->m_keyboard_data.tail)
+		// scan all lines (excluding shift)
+		UINT8 scan_code = 0;
+		for (int i=0; i<8; i++)
 		{
-			int code;
+			UINT8 keyboard_line_data = input_port_read(machine, keynames[i]);
 
-			state->m_keyboard_data.transmit_state = KC_KEYBOARD_TRANSMIT_ACTIVE;
-
-			/* get code */
-			code = state->m_keyboard_data.keycodes[state->m_keyboard_data.head];
-			/* update start of list */
-			state->m_keyboard_data.head = (state->m_keyboard_data.head + 1) % KC_KEYCODE_QUEUE_LENGTH;
-
-			/* setup transmit buffer with scan-code */
-			kc_keyboard_begin_transmit(machine, code);
-		}
-	}
-}
-
-
-/* update keyboard */
-static TIMER_CALLBACK(kc_keyboard_update)
-{
-	kc_state *state = machine.driver_data<kc_state>();
-	int i;
-	static const char *const keynames[] = { "KEY0", "KEY1", "KEY2", "KEY3", "KEY4", "KEY5", "KEY6", "KEY7" };
-
-	/* scan all lines (excluding shift) */
-	for (i=0; i<KC_KEYBOARD_NUM_LINES-1; i++)
-	{
-		int b;
-		int keyboard_line_data;
-		int changed_keys;
-		int mask = 0x001;
-
-		/* read input port */
-		keyboard_line_data = input_port_read(machine, keynames[i]);
-		/* identify keys that have changed */
-		changed_keys = keyboard_line_data ^ state->m_previous_keyboard[i];
-		/* store input port for next time */
-		state->m_previous_keyboard[i] = keyboard_line_data;
-
-		/* scan through each bit */
-		for (b=0; b<8; b++)
-		{
-			/* key changed? */
-			if (changed_keys & mask)
+			// scan through each bit
+			for (int b=0; b<8; b++)
 			{
-				/* yes */
-
-				/* new state is pressed? */
-				if ((keyboard_line_data & mask)!=0)
+				// is pressed?
+				if ((keyboard_line_data & (1<<b)) != 0)
 				{
-					/* pressed */
-					int code;
-
-					/* generate fake code */
-					code = (i<<3) | b;
-					LOG_KBD(("code: %02x\n",code));
-					kc_keyboard_queue_scancode(state, code);
+					// generate fake code
+					scan_code = (i<<3) | b;
+					break;
+//					kc_keyboard_transmit_scancode(machine, code);
 				}
 			}
-
-			mask = mask<<1;
 		}
-	}
-
-	kc_keyboard_attempt_transmit(machine);
+		// FLOH: keyboard hack
+		kc_keyboard_write_key(machine, scan_code);
+//	}
 }
 
 /*********************************************************************/
@@ -1788,10 +1744,13 @@ MACHINE_START(kc85)
 
 	// from keyboard init
 	/* 50 Hz is just a arbitrary value - used to put scan-codes into the queue for transmitting */
-	machine.scheduler().timer_pulse(attotime::from_hz(50), FUNC(kc_keyboard_update));
+//	machine.scheduler().timer_pulse(attotime::from_hz(50), FUNC(kc_keyboard_update));
 
 	/* timer to transmit pulses to kc base unit */
-	machine.scheduler().timer_pulse(attotime::from_usec(1024), FUNC(kc_keyboard_transmit_timer_callback));
+//	machine.scheduler().timer_pulse(attotime::from_usec(1024), FUNC(kc_keyboard_update_and_transmit));
+
+// FLOH keyboard hack
+machine.scheduler().timer_pulse(attotime::from_hz(50), FUNC(kc_keyboard_update_and_transmit));
 
 	machine.scheduler().timer_pulse(attotime::from_hz(15625), FUNC(kc85_15khz_timer_callback), 0, (void *)machine.device("z80ctc"));
 	machine.scheduler().timer_set(attotime::zero, FUNC(kc85_reset_timer_callback));

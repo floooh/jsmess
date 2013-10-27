@@ -23,30 +23,18 @@
 #define KC85_SCREEN_WIDTH 320
 #define KC85_SCREEN_HEIGHT 256
 
-/* number of keycodes that can be stored in queue */
-#define KC_KEYCODE_QUEUE_LENGTH 256
-
-#define KC_KEYBOARD_NUM_LINES	9
+#define KC_TRANSMIT_BUFFER_LENGTH 256
 
 typedef struct kc_keyboard
 {
-	/* list of stored keys */
-	unsigned char keycodes[KC_KEYCODE_QUEUE_LENGTH];
-	/* index of start of list */
-	int head;
-	/* index of end of list */
-	int tail;
+	// pulses to transmit
+	struct
+	{
+		UINT8 data[KC_TRANSMIT_BUFFER_LENGTH>>3];
+		int pulse_sent;
+		int pulse_count;
+	} m_transmit_buffer;
 
-	/* transmitting state */
-	int transmit_state;
-
-	/* number of pulses remaining to be transmitted */
-	int	transmit_pulse_count_remaining;
-	/* count of pulses transmitted so far */
-	int transmit_pulse_count;
-
-	/* pulses to transmit */
-	unsigned char transmit_buffer[32];
 } kc_keyboard;
 
 
@@ -63,7 +51,6 @@ public:
 	emu_timer *m_cassette_timer;
 	int m_cassette_motor_state;
 	unsigned char m_ardy;
-	int m_previous_keyboard[KC_KEYBOARD_NUM_LINES-1];
 	unsigned char m_brdy;
 	kc_keyboard m_keyboard_data;
 	int m_kc85_84_data;
