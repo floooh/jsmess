@@ -103,15 +103,21 @@ QUICKLOAD_LOAD(kc)
 	int i;
 
 	if (!kc_load(image, &data))
+	{
 		return IMAGE_INIT_FAIL;
+	}
 
 	header = (struct kcc_header *) data;
 	datasize = (header->length_l & 0x0ff) | ((header->length_h & 0x0ff)<<8);
 	datasize = datasize-128;
 	addr = (header->load_address_l & 0x0ff) | ((header->load_address_h & 0x0ff)<<8);
 
+mame_printf_verbose("QUICKLOAD: datasize=0x%04x, addr=0x%04x\n", datasize, addr);	
+
 	for (i=0; i<datasize; i++)
+	{
 		ram_get_ptr(image.device().machine().device(RAM_TAG))[(addr+i) & 0x0ffff] = data[i+128];
+	}
 	return IMAGE_INIT_PASS;
 }
 
@@ -873,7 +879,7 @@ void kc_keyboard_write_key(running_machine& machine, unsigned char scan_code)
 	static int repeat_count = 0;
 
 	// don't overwrite if previous key hasn't been read yet
-	if (0 == (ram_get_ptr(machine.device(RAM_TAG))[0x1f8] & 1))
+//	if (0 == (ram_get_ptr(machine.device(RAM_TAG))[0x1f8] & 1))
 	{
 		// special case: no key pressed
 		if (0 == scan_code)
@@ -931,8 +937,6 @@ mame_printf_verbose("pulse: %d, write: %d\n", pulse & state->m_brdy, state->m_kc
 /* initialise keyboard queue */
 static void kc_keyboard_init(running_machine &machine)
 {
-mame_printf_verbose(("FLOH: kc_keyboard_init CALLED!\n"));
-
 	kc_state *state = machine.driver_data<kc_state>();
 /*
 	state->m_keyboard_data.m_transmit_buffer.pulse_sent = 0;
@@ -992,7 +996,6 @@ static TIMER_CALLBACK(kc_keyboard_update_and_transmit)
 					// generate fake code
 					scan_code = (i<<3) | b;
 					break;
-//					kc_keyboard_transmit_scancode(machine, code);
 				}
 			}
 		}
@@ -1750,7 +1753,7 @@ MACHINE_START(kc85)
 //	machine.scheduler().timer_pulse(attotime::from_usec(1024), FUNC(kc_keyboard_update_and_transmit));
 
 // FLOH keyboard hack
-machine.scheduler().timer_pulse(attotime::from_hz(50), FUNC(kc_keyboard_update_and_transmit));
+machine.scheduler().timer_pulse(attotime::from_hz(100), FUNC(kc_keyboard_update_and_transmit));
 
 	machine.scheduler().timer_pulse(attotime::from_hz(15625), FUNC(kc85_15khz_timer_callback), 0, (void *)machine.device("z80ctc"));
 	machine.scheduler().timer_set(attotime::zero, FUNC(kc85_reset_timer_callback));

@@ -13,8 +13,8 @@
 #include "imagedev/snapquik.h"
 #include "machine/upd765.h"
 
-#define KC85_4_CLOCK 1750000
-#define KC85_3_CLOCK 1750000
+#define KC85_3_CLOCK 1751938
+#define KC85_4_CLOCK 1773447
 
 #define KC85_4_SCREEN_PIXEL_RAM_SIZE 0x04000
 #define KC85_4_SCREEN_COLOUR_RAM_SIZE 0x04000
