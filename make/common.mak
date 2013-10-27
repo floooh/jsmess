@@ -30,7 +30,7 @@ SED_I = sed --help >/dev/null 2>&1 && sed -i $(1) || sed -i '' $(1)
 
 
 
-EMSCRIPTEN_DIR := $(CURDIR)/third_party/emscripten
+EMSCRIPTEN_DIR := $(CURDIR)/../emscripten
 EMMAKE := $(EMSCRIPTEN_DIR)/emmake
 EMCC := $(EMSCRIPTEN_DIR)/emcc
 
