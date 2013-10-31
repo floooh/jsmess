@@ -45,49 +45,20 @@ bit 1: TONE 1
 bit 0: TRUCK */
 
 
-/* load image */
-static int kc_load(device_image_interface &image, unsigned char **ptr)
-{
-	int datasize;
-	unsigned char *data;
-
-	/* get file size */
-	datasize = image.length();
-
-	if (datasize!=0)
-	{
-		/* malloc memory for this data */
-		data = (unsigned char *)malloc(datasize);
-
-		if (data!=NULL)
-		{
-			/* read whole file */
-			image.fread( data, datasize);
-
-			*ptr = data;
-
-			logerror("File loaded!\r\n");
-
-			/* ok! */
-			return 1;
-		}
-	}
-
-	return 0;
-}
-
 struct kcc_header
 {
-	unsigned char	name[10];
-	unsigned char	reserved[6];
-	unsigned char	anzahl;
-	unsigned char	load_address_l;
-	unsigned char	load_address_h;
-	unsigned char	length_l;
-	unsigned char	length_h;
-	unsigned short	execution_address;
-	unsigned char	pad[128-2-2-2-1-16];
+	UINT8   name[10];
+	UINT8   reserved[6];
+	UINT8   number_addresses;
+	UINT8   load_address_l;
+	UINT8   load_address_h;
+	UINT8   end_address_l;
+	UINT8   end_address_h;
+	UINT8   execution_address_l;
+	UINT8   execution_address_h;
+	UINT8   pad[128-2-2-2-1-16];
 };
+
 
 /* appears to work a bit.. */
 /* load file, then type: MENU and it should now be displayed. */
@@ -96,31 +67,57 @@ struct kcc_header
 /* load snapshot */
 QUICKLOAD_LOAD(kc)
 {
-	unsigned char *data;
+	UINT8 *data;
 	struct kcc_header *header;
-	int addr;
-	int datasize;
-	int i;
+	UINT16 addr;
+	UINT16 datasize;
+	UINT16 execution_address;
+	UINT16 i;
 
-	if (!kc_load(image, &data))
+	/* get file size */
+	UINT64 size = image.length();
+
+	if (size != 0)
+	{
+		/* malloc memory for this data */
+		data = (UINT8 *)auto_alloc_array(image.device().machine(), UINT8, size);
+
+		if (data != NULL)
+			image.fread( data, size);
+	}
+	else
 	{
 		return IMAGE_INIT_FAIL;
 	}
 
 	header = (struct kcc_header *) data;
-	datasize = (header->length_l & 0x0ff) | ((header->length_h & 0x0ff)<<8);
-	datasize = datasize-128;
 	addr = (header->load_address_l & 0x0ff) | ((header->load_address_h & 0x0ff)<<8);
+	datasize = ((header->end_address_l & 0x0ff) | ((header->end_address_h & 0x0ff)<<8)) - addr;
+	execution_address = (header->execution_address_l & 0x0ff) | ((header->execution_address_h & 0x0ff)<<8);
 
-mame_printf_verbose("QUICKLOAD: datasize=0x%04x, addr=0x%04x\n", datasize, addr);	
+	if (datasize > size - 128)
+	{
+		mame_printf_info("Invalid snapshot size: expected 0x%04x, found 0x%04x\n", datasize, (UINT32)size - 128);
+		datasize = size - 128;
+	}
 
 	for (i=0; i<datasize; i++)
 	{
-		ram_get_ptr(image.device().machine().device(RAM_TAG))[(addr+i) & 0x0ffff] = data[i+128];
+		ram_get_ptr(image.device().machine().device(RAM_TAG))[(addr+i) & 0x0ffff] = data[i+128];		
 	}
+
+	if (execution_address != 0 && header->number_addresses >= 3 )
+	{
+		// if specified, jumps to the quickload start address
+		cpu_set_reg(image.device().machine().device("maincpu"), STATE_GENPC, execution_address);
+	}
+
+	auto_free(image.device().machine(), data);
+
+	mame_printf_verbose("Snapshot loaded at: 0x%04x-0x%04x, execution address: 0x%04x\n", addr, addr + datasize - 1, execution_address);
+
 	return IMAGE_INIT_PASS;
 }
-
 
 /******************/
 /* DISK EMULATION */
@@ -808,7 +805,10 @@ triggers the time measurement by the CTC channel 3." */
     transmit_timer is used to transmit the scan-code to the kc.
 */
 
-/* FLOH keyboard hack: convert scan code to ascii */
+/* 	FLOH keyboard hack: convert scan code to ascii */
+/* 	FIXME: emscripten's SDL wrapper currently reports E and Backspace
+	both as 8 (see library_SDL.js)
+*/
 unsigned char kc_keyboard_scancode_to_ascii(int shift, unsigned char scan_code)
 {
 	unsigned char ascii;
@@ -878,45 +878,41 @@ void kc_keyboard_write_key(running_machine& machine, unsigned char scan_code)
 {
 	static int repeat_count = 0;
 
-	// don't overwrite if previous key hasn't been read yet
-//	if (0 == (ram_get_ptr(machine.device(RAM_TAG))[0x1f8] & 1))
+	// special case: no key pressed
+	if (0xFF == scan_code)
 	{
-		// special case: no key pressed
-		if (0 == scan_code)
+		repeat_count = 0;
+		ram_get_ptr(machine.device(RAM_TAG))[0x1fd] = 0;	// clear ascii code location
+		ram_get_ptr(machine.device(RAM_TAG))[0x1fa]	= 0;	// clear repeat counter
+	}
+	else
+	{
+		// get state of shift key
+		int shift = input_port_read(machine, "SHIFT") & 0x01;		
+		const unsigned char ascii = kc_keyboard_scancode_to_ascii(shift, scan_code);
+		int write_char = 1;
+		// same as stored?
+		if (ascii == ram_get_ptr(machine.device(RAM_TAG))[0x1fd])
 		{
-			repeat_count = 0;
-			ram_get_ptr(machine.device(RAM_TAG))[0x1fd] = 0;	// clear ascii code location
-			ram_get_ptr(machine.device(RAM_TAG))[0x1fa]	= 0;	// clear repeat counter
+			// yes, must be held for certain amount of time before repeat?
+			const int repeat_time = (repeat_count == 0) ? 40 : 15;
+			if (ram_get_ptr(machine.device(RAM_TAG))[0x1fa]++ > repeat_time)
+			{
+				// reset repeat counter
+				ram_get_ptr(machine.device(RAM_TAG))[0x1fa]	= 0;
+				repeat_count++;
+			}
+			else
+			{
+				// wait a little longer
+				write_char = 0;
+			}
 		}
-		else
+		if (write_char)
 		{
-			// get state of shift key
-			int shift = input_port_read(machine, "SHIFT") & 0x01;		
-			const unsigned char ascii = kc_keyboard_scancode_to_ascii(shift, scan_code);
-			int write_char = 1;
-			// same as stored?
-			if (ascii == ram_get_ptr(machine.device(RAM_TAG))[0x1fd])
-			{
-				// yes, must be held for certain amount of time before repeat?
-				const int repeat_time = (repeat_count == 0) ? 40 : 20;
-				if (ram_get_ptr(machine.device(RAM_TAG))[0x1fa]++ > repeat_time)
-				{
-					// reset repeat counter
-					ram_get_ptr(machine.device(RAM_TAG))[0x1fa]	= 0;
-					repeat_count++;
-				}
-				else
-				{
-					// wait a little longer
-					write_char = 0;
-				}
-			}
-			if (write_char)
-			{
-				// store character
-				ram_get_ptr(machine.device(RAM_TAG))[0x1fd] = ascii;
-				ram_get_ptr(machine.device(RAM_TAG))[0x1f8] |= 1;
-			}
+			// store character
+			ram_get_ptr(machine.device(RAM_TAG))[0x1fd] = ascii;
+			ram_get_ptr(machine.device(RAM_TAG))[0x1f8] |= 1;
 		}
 	}
 }
@@ -982,7 +978,8 @@ static TIMER_CALLBACK(kc_keyboard_update_and_transmit)
 		keyboard_data.m_transmit_buffer.pulse_count = 0;
 
 		// scan all lines (excluding shift)
-		UINT8 scan_code = 0;
+		// 0xFF is my own special case meaning "no key pressed"
+		UINT8 scan_code = 0xFF;
 		for (int i=0; i<8; i++)
 		{
 			UINT8 keyboard_line_data = input_port_read(machine, keynames[i]);
