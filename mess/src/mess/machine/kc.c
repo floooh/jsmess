@@ -59,20 +59,49 @@ struct kcc_header
 	UINT8   pad[128-2-2-2-1-16];
 };
 
+static const char* tap_header_string = "\xC3KC-TAPE by AF. ";
+struct tap_header
+{
+	UINT8 sig[16];		// "0xC3KC-TAPE by AF. "
+	UINT8 type;			// 00: KCTAP_Z9001 01: KCTAP_KC85, else: KCTAP_SYS
+	UINT8 name[10];		// from here on identical with .KCC
+	UINT8 reserved[6];
+	UINT8 number_addresses;
+	UINT8 load_address_l;
+	UINT8 load_address_h;
+	UINT8 end_address_l;
+	UINT8 end_address_h;
+	UINT8 execution_address_l;
+	UINT8 execution_address_h;
+	UINT8 pad[145-2-2-2-1-16-17];
+};
+
 
 /* appears to work a bit.. */
 /* load file, then type: MENU and it should now be displayed. */
 /* now type name that has appeared! */
 
+// test if this is a TAP file
+int check_tap_file(UINT8* data, UINT64 size)
+{
+	const int tap_header_string_len = strlen(tap_header_string);
+	if (size >= tap_header_string_len)
+	{
+		return (0 == memcmp(data, tap_header_string, tap_header_string_len)) ? 1 : 0;
+	}
+	return false;
+}
+
 /* load snapshot */
 QUICKLOAD_LOAD(kc)
 {
 	UINT8 *data;
-	struct kcc_header *header;
 	UINT16 addr;
 	UINT16 datasize;
 	UINT16 execution_address;
+	UINT8 num_addresses;
 	UINT16 i;
+	UINT16 data_offset;
 
 	/* get file size */
 	UINT64 size = image.length();
@@ -90,23 +119,73 @@ QUICKLOAD_LOAD(kc)
 		return IMAGE_INIT_FAIL;
 	}
 
-	header = (struct kcc_header *) data;
-	addr = (header->load_address_l & 0x0ff) | ((header->load_address_h & 0x0ff)<<8);
-	datasize = ((header->end_address_l & 0x0ff) | ((header->end_address_h & 0x0ff)<<8)) - addr;
-	execution_address = (header->execution_address_l & 0x0ff) | ((header->execution_address_h & 0x0ff)<<8);
-
-	if (datasize > size - 128)
+	bool is_tap_file = false;
+	bool is_kcc_file = false;
+	if (check_tap_file(data, size))
 	{
-		mame_printf_info("Invalid snapshot size: expected 0x%04x, found 0x%04x\n", datasize, (UINT32)size - 128);
-		datasize = size - 128;
+		// a .TAP file
+		is_tap_file = true;
+		mame_printf_verbose("Loading .TAP file...\n");
+		struct tap_header* header = (struct tap_header *) data;
+		addr = (header->load_address_l & 0x0ff) | ((header->load_address_h & 0x0ff)<<8);
+		datasize = ((header->end_address_l & 0x0ff) | ((header->end_address_h & 0x0ff)<<8)) - addr;
+		execution_address = (header->execution_address_l & 0x0ff) | ((header->execution_address_h & 0x0ff)<<8);
+		num_addresses = header->number_addresses;
+		data_offset = sizeof(tap_header);
+	}
+	else
+	{
+		// a .KCC file
+		is_kcc_file = true;
+		mame_printf_verbose("Loading .KCC file...\n");
+		struct kcc_header* header = (struct kcc_header *) data;
+		addr = (header->load_address_l & 0x0ff) | ((header->load_address_h & 0x0ff)<<8);
+		datasize = ((header->end_address_l & 0x0ff) | ((header->end_address_h & 0x0ff)<<8)) - addr;
+		execution_address = (header->execution_address_l & 0x0ff) | ((header->execution_address_h & 0x0ff)<<8);
+		num_addresses = header->number_addresses;
+		data_offset = sizeof(kcc_header);
 	}
 
-	for (i=0; i<datasize; i++)
+	if (datasize > size - data_offset)
 	{
-		ram_get_ptr(image.device().machine().device(RAM_TAG))[(addr+i) & 0x0ffff] = data[i+128];		
+		mame_printf_info("Invalid snapshot size: expected 0x%04x, found 0x%04x\n", datasize, (UINT32)size - data_offset);
+		datasize = size - data_offset;
 	}
 
-	if (execution_address != 0 && header->number_addresses >= 3 )
+	if (is_tap_file)
+	{
+		// TAP files have a byte between each 128 byte block
+		int src_pos = 0;
+		int dst_pos = 0;
+		int n = datasize;
+		int blk_remain = 0;
+		while ((n > 0) && (src_pos < datasize)) 
+		{
+			if (0 == blk_remain)
+			{
+				blk_remain = 128;
+			}
+			else
+			{
+				// copy next byte to memory
+				ram_get_ptr(image.device().machine().device(RAM_TAG))[(addr+dst_pos) & 0x0ffff] = data[data_offset+src_pos];		
+				dst_pos++;
+				n--;
+				blk_remain--;
+			}
+			src_pos++;
+		}
+	}
+	else
+	{
+		// KCC files are continuous
+		for (i=0; i<datasize; i++)
+		{
+			ram_get_ptr(image.device().machine().device(RAM_TAG))[(addr+i) & 0x0ffff] = data[i+data_offset];		
+		}
+	}
+
+	if (execution_address != 0 && num_addresses >= 3 )
 	{
 		// if specified, jumps to the quickload start address
 		cpu_set_reg(image.device().machine().device("maincpu"), STATE_GENPC, execution_address);
@@ -114,7 +193,7 @@ QUICKLOAD_LOAD(kc)
 
 	auto_free(image.device().machine(), data);
 
-	mame_printf_verbose("Snapshot loaded at: 0x%04x-0x%04x, execution address: 0x%04x\n", addr, addr + datasize - 1, execution_address);
+	mame_printf_verbose("Snapshot loaded at: 0x%04x-0x%04x, execution address: 0x%04x, data_offset: 0x%04x\n", addr, addr + datasize - 1, execution_address, data_offset);
 
 	return IMAGE_INIT_PASS;
 }
@@ -1688,16 +1767,17 @@ static WRITE_LINE_DEVICE_HANDLER(kc85_zc1_callback)
 
 }
 
-
+// NOTE: this is only needed for the cassette interface
+/*
 static TIMER_CALLBACK(kc85_15khz_timer_callback)
 {
 	device_t *device = (device_t *)ptr;
 	kc_state *state = device->machine().driver_data<kc_state>();
 
-	/* toggle state of square wave */
+	// toggle state of square wave 
 	state->m_kc85_15khz_state^=1;
 
-	/* set clock input for channel 2 and 3 to ctc */
+	// set clock input for channel 2 and 3 to ctc 
 	z80ctc_trg0_w(device, state->m_kc85_15khz_state);
 	z80ctc_trg1_w(device, state->m_kc85_15khz_state);
 
@@ -1707,14 +1787,15 @@ static TIMER_CALLBACK(kc85_15khz_timer_callback)
 	{
 		state->m_kc85_15khz_count = 0;
 
-		/* toggle state of square wave */
+		// toggle state of square wave 
 		state->m_kc85_50hz_state^=1;
 
-		/* set clock input for channel 2 and 3 to ctc */
+		// set clock input for channel 2 and 3 to ctc 
 		z80ctc_trg2_w(device, state->m_kc85_50hz_state);
 		z80ctc_trg3_w(device, state->m_kc85_50hz_state);
 	}
 }
+*/
 
 /* video blink */
 static WRITE_LINE_DEVICE_HANDLER( kc85_zc2_callback )
@@ -1749,10 +1830,11 @@ MACHINE_START(kc85)
 	/* timer to transmit pulses to kc base unit */
 //	machine.scheduler().timer_pulse(attotime::from_usec(1024), FUNC(kc_keyboard_update_and_transmit));
 
-// FLOH keyboard hack
-machine.scheduler().timer_pulse(attotime::from_hz(100), FUNC(kc_keyboard_update_and_transmit));
+	// FLOH keyboard hack
+	machine.scheduler().timer_pulse(attotime::from_hz(50), FUNC(kc_keyboard_update_and_transmit));
 
-	machine.scheduler().timer_pulse(attotime::from_hz(15625), FUNC(kc85_15khz_timer_callback), 0, (void *)machine.device("z80ctc"));
+// FLOH disable the 15kHz timer
+//	machine.scheduler().timer_pulse(attotime::from_hz(15625), FUNC(kc85_15khz_timer_callback), 0, (void *)machine.device("z80ctc"));
 	machine.scheduler().timer_set(attotime::zero, FUNC(kc85_reset_timer_callback));
 }
 
